@@ -65,6 +65,7 @@
 #define WIDTH(X) ((X)->w + 2 * (X)->bw)
 #define HEIGHT(X) ((X)->h + 2 * (X)->bw)
 #define TAGMASK ((1 << LENGTH(tags)) - 1)
+#define USEMASK ((1 << LENGTH(tags) - hidnum) - 1)
 #define TEXTW(X) (drw_fontset_getwidth(drw, (X)) + lrpad)
 #define TRUNC(X, A, B) (MAX((A), MIN((X), (B))))
 
@@ -87,7 +88,11 @@ enum {
   SchemeInfoSel,
   SchemeInfoNorm,
   SchemeLogo,
-  SchemeLayout
+  SchemeLayout,
+  Icon0,
+  Icon1,
+  Icon2,
+  Icon3
 }; /* color schemes */
 enum {
   NetSupported,
@@ -115,6 +120,8 @@ enum {
   ClkWinTitle,
   ClkClientWin,
   ClkRootWin,
+  ClkHidden,
+  ClkButton,
   ClkLast
 };                                                      /* clicks */
 enum { DirHor, DirVer, DirRotHor, DirRotVer, DirLast }; /* tiling dirs */
@@ -183,6 +190,7 @@ struct Monitor {
   unsigned int seltags;
   unsigned int sellt;
   unsigned int tagset[2];
+  unsigned int hidinit;
   int showbar;
   int topbar;
   Client *clients;
@@ -213,6 +221,7 @@ static void arrange(Monitor *m);
 static void arrangemon(Monitor *m);
 static void attach(Client *c);
 static void attachstack(Client *c);
+static void buttonbar(const Arg *arg);
 static void buttonpress(XEvent *e);
 static void checkotherwm(void);
 static void cleanup(void);
@@ -281,11 +290,13 @@ static void showhide(Client *c);
 static void sigchld(int unused);
 static void spawn(const Arg *arg);
 static int stackpos(const Arg *arg);
+static void tablethandler(int signo);
 static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
 static void tile(Monitor *);
 static void togglebar(const Arg *arg);
 static void togglefloating(const Arg *arg);
+static void togglehidden(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void unfocus(Client *c, int setfocus);
@@ -351,6 +362,7 @@ static int useargb = 0;
 static Visual *visual;
 static int depth;
 static Colormap cmap;
+static int istablet=0;
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
@@ -510,6 +522,20 @@ void attachstack(Client *c) {
   c->mon->stack = c;
 }
 
+void buttonbar(const Arg *arg){
+  Arg arg2;
+  switch (arg->i) {
+    case 1:
+      arg2.i = 0;
+      killclient(&arg2);
+    break;
+    case 2:
+    break;
+    case 3:
+    break;
+  }
+}
+
 void buttonpress(XEvent *e) {
   unsigned int i, x, click, occ = 0;
   Arg arg = {0};
@@ -526,35 +552,65 @@ void buttonpress(XEvent *e) {
   }
   if (ev->window == selmon->barwin) {
     i = x = 0;
-    for (c = m->clients; c; c = c->next)
-      occ |= c->tags == 255 ? 0 : c->tags;
-    do {
-      /* do not reserve space for vacant tags */
-      if (!(occ & 1 << i || m->tagset[m->seltags] & 1 << i))
-        continue;
-      x += TEXTW(tags[i]);
-    } while (ev->x >= x && ++i < LENGTH(tags));
-    if (i < LENGTH(tags)) {
-      click = ClkTagBar;
-      arg.ui = 1 << i;
-    } else if (ev->x < x + blw)
+    for (c = m->clients; c; c = c->next) occ |= c->tags == 255 ? 0 : c->tags;
+    if(istablet){
+      x += TEXTW(closebut);
+      if(ev->x < x){
+        click = ClkButton;
+          arg.i = 1;
+          goto end;
+      }
+      x += TEXTW(movebut);
+      if(ev->x < x){
+        click = ClkButton;
+          arg.i = 2;
+          goto end;
+      }
+      x += TEXTW(resizebut);
+      if(ev->x < x){
+        click = ClkButton;
+          arg.i = 3;
+          goto end;
+      }
+    }
+    for(; i < LENGTH(tags) - hidnum; ++i){
+      if (!(occ & 1 << i || m->tagset[m->seltags] & 1 << i)) continue;
+        x += TEXTW(tags[i]);
+        if(ev->x < x) {
+          click = ClkTagBar;
+          arg.ui = 1 << i;
+          goto end;
+        }
+      }
+    if (ev->x < (x += blw)) {
       click = ClkLtSymbol;
-    else if (ev->x > selmon->ww - (int)TEXTW(stext))
-      click = ClkStatusText;
-    else
-      click = ClkWinTitle;
+      goto end;
+    }
+      for(i = LENGTH(tags) - hidnum; i < LENGTH(tags); ++i){
+        if (!(occ & 1 << i || m->tagset[m->seltags] & 1 << i)) continue;
+          x += TEXTW(tags[i]);
+          if(ev->x < x) {
+            click = ClkHidden;
+            arg.i = i - LENGTH(tags) + hidnum;
+            goto end;
+            // togglehidden(&arg);
+            // return;
+        }
+      }
+    if (ev->x > selmon->ww - (int)TEXTW(stext)) click = ClkStatusText;
+    else click = ClkWinTitle;
   } else if ((c = wintoclient(ev->window))) {
     focus(c);
     restack(selmon);
     XAllowEvents(dpy, ReplayPointer, CurrentTime);
     click = ClkClientWin;
   }
+
+  end:
+
   for (i = 0; i < LENGTH(buttons); i++)
-    if (click == buttons[i].click && buttons[i].func &&
-        buttons[i].button == ev->button &&
-        CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state))
-      buttons[i].func(
-          click == ClkTagBar && buttons[i].arg.i == 0 ? &arg : &buttons[i].arg);
+    if (click == buttons[i].click && buttons[i].func && buttons[i].button == ev->button && CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state))
+      buttons[i].func((click == ClkTagBar || click == ClkHidden || click == ClkButton) && buttons[i].arg.i == 0 ? &arg : &buttons[i].arg);
 }
 
 void checkotherwm(void) {
@@ -950,12 +1006,24 @@ void drawbar(Monitor *m) {
     drw_text(drw, x, 0, w, bh, lrpad / 2, logo, 0);
     x += w;
   }
-  for (i = 0; i < LENGTH(tags); i++) {
+  if (istablet) {
+    w = TEXTW(closebut);
+    drw_setscheme(drw, scheme[SchemeLogo]);
+    drw_text(drw, x, 0, w, bh, lrpad / 2, closebut, 0);
+    x += w;
+    w = TEXTW(movebut);
+    drw_setscheme(drw, scheme[SchemeLogo]);
+    drw_text(drw, x, 0, w, bh, lrpad / 2, movebut, 0);
+    x += w;
+    w = TEXTW(resizebut);
+    drw_setscheme(drw, scheme[SchemeLogo]);
+    drw_text(drw, x, 0, w, bh, lrpad / 2, resizebut, 0);
+    x += w;
+  }
+  for (i = 0; i < LENGTH(tags) - hidnum; i++) {
     w = TEXTW(tags[i]);
     if (occ & 1 << i || m->tagset[m->seltags] & 1 << i) {
-      drw_setscheme(drw,
-                    scheme[m->tagset[m->seltags] & 1 << i ? SchemeTagsSel
-                                                          : SchemeTagsNorm]);
+      drw_setscheme(drw, scheme[m->tagset[m->seltags] & 1 << i ? SchemeTagsSel : SchemeTagsNorm]);
       drw_text(drw, x, 0, w, bh, lrpad / 2, tags[i], urg & 1 << i);
       x += w;
     }
@@ -963,7 +1031,16 @@ void drawbar(Monitor *m) {
   w = blw = TEXTW(m->ltsymbol);
   drw_setscheme(drw, scheme[SchemeLayout]);
   x = drw_text(drw, x, 0, w, bh, lrpad / 2, m->ltsymbol, 0);
-
+  
+  for (i = LENGTH(tags) - hidnum; i < LENGTH(tags); i++) {
+    w = TEXTW(tags[i]);
+    if (occ & 1 << i || m->tagset[m->seltags] & 1 << i) {
+      drw_setscheme(drw, scheme[m->tagset[m->seltags] & 1 << i ? Icon0 + i - LENGTH(tags) + hidnum : SchemeTagsNorm]);
+      drw_text(drw, x, 0, w, bh, lrpad / 2, tags[i], urg & 1 << i);
+      x += w;
+    }
+  }
+  
   if ((w = m->ww - tw - x) > bh) {
     drw_setscheme(drw, scheme[SchemeInfoNorm]);
     if (m->sel) {
@@ -1332,7 +1409,7 @@ void monocle(Monitor *m) {
   if (n > 0) /* override layout symbol */
     snprintf(m->ltsymbol, sizeof m->ltsymbol, "[%d]", n);
   for (c = nexttiled(m->clients); c; c = nexttiled(c->next))
-    resize(c, m->wx, m->wy, m->ww - 2 * c->bw, m->wh - 2 * c->bw, 0);
+    resize(c, m->wx + ogappx, m->wy + ogappx, m->ww - 2 * (c->bw + ogappx), m->wh - 2 * (c->bw + ogappx), 0);
 }
 
 void motionnotify(XEvent *e) {
@@ -1643,10 +1720,10 @@ void restack(Monitor *m) {
   XEvent ev;
   XWindowChanges wc;
 
-  for (c = m->stack; c; c = c->snext)
-    roundcorners(c);
+  /* roundcorners(wintoclient(m->barwin)); */
+  /* for (c = m->stack; c; c = c->snext) */
+  /*   roundcorners(c); */
 
-  drawbar(m);
   if (!m->sel)
     return;
   if (m->sel->isfloating || !m->lt[m->sellt]->arrange)
@@ -1660,6 +1737,8 @@ void restack(Monitor *m) {
         wc.sibling = c->win;
       }
   }
+
+  drawbar(m);
   XSync(dpy, False);
   while (XCheckMaskEvent(dpy, EnterWindowMask, &ev))
     ;
@@ -1855,6 +1934,8 @@ void setup(void) {
   /* clean up any zombies immediately */
   sigchld(0);
 
+  signal(SIGUSR1, tablethandler);
+
   /* init screen */
   screen = DefaultScreen(dpy);
   sw = DisplayWidth(dpy, screen);
@@ -2006,6 +2087,10 @@ int stackpos(const Arg *arg) {
     return arg->i;
 }
 
+void tablethandler(int signo){
+  istablet = !istablet; 
+}
+
 void tag(const Arg *arg) {
   if (selmon->sel && arg->ui & TAGMASK) {
     selmon->sel->tags = arg->ui & TAGMASK;
@@ -2095,13 +2180,56 @@ void togglefloating(const Arg *arg) {
            selmon->sel->h, 0);
   arrange(selmon);
 }
+void togglehidden(const Arg *arg) {
+  unsigned ui = 1 << (arg->i + LENGTH(tags) - hidnum);
+  unsigned int newtagset =
+      selmon->tagset[selmon->seltags] ^ (ui & ~USEMASK);
+  int i;
+  if(!(selmon->hidinit & (ui & ~USEMASK))){
+    Arg app;
+    app.v = (const char *[]) { "/bin/sh", "-c", cmds[(arg->i)], NULL };
+    spawn(&app);
+    app.v = (const char *[]) { "/bin/sh", "-c", "/home/mattia/.scripts/swapfocus", cmds[(arg->i)], NULL };
+    spawn(&app);
+/*     if(cmds[(arg->i)] == "spotify"){ */
+/*       system("swapfocus spotify"); */
+
+/*     } */
+    selmon->hidinit |= (ui & ~USEMASK);
+  }
+
+  if (newtagset) {
+    selmon->tagset[selmon->seltags] = newtagset;
+    /* test if the user did not select the same tag */
+    if (!(newtagset & 1 << (selmon->pertag->curtag - 1))) {
+      selmon->pertag->prevtag = selmon->pertag->curtag;
+      for (i = 0; !(newtagset & 1 << i); i++)
+        ;
+      selmon->pertag->curtag = i + 1;
+    }
+
+    /* apply settings for this view */
+    selmon->nmaster = selmon->pertag->nmasters[selmon->pertag->curtag];
+    selmon->sellt = selmon->pertag->sellts[selmon->pertag->curtag];
+    selmon->lt[selmon->sellt] =
+        selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt];
+    selmon->lt[selmon->sellt ^ 1] =
+        selmon->pertag->ltidxs[selmon->pertag->curtag][selmon->sellt ^ 1];
+
+    if (selmon->showbar != selmon->pertag->showbars[selmon->pertag->curtag])
+      togglebar(NULL);
+
+    focus(NULL);
+    arrange(selmon);
+  }
+}
 
 void toggletag(const Arg *arg) {
   unsigned int newtags;
 
   if (!selmon->sel)
     return;
-  newtags = selmon->sel->tags ^ (arg->ui & TAGMASK);
+  newtags = selmon->sel->tags ^ (arg->ui & USEMASK);
   if (newtags) {
     selmon->sel->tags = newtags;
     focus(NULL);
@@ -2111,13 +2239,13 @@ void toggletag(const Arg *arg) {
 
 void toggleview(const Arg *arg) {
   unsigned int newtagset =
-      selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK);
+      selmon->tagset[selmon->seltags] ^ (arg->ui & USEMASK);
   int i;
 
   if (newtagset) {
     selmon->tagset[selmon->seltags] = newtagset;
 
-    if (newtagset == ~0) {
+    if (newtagset == USEMASK) {
       selmon->pertag->prevtag = selmon->pertag->curtag;
       selmon->pertag->curtag = 0;
     }
@@ -2412,11 +2540,11 @@ void view(const Arg *arg) {
   int i;
   unsigned int tmptag;
 
-  if ((arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
+  if ((arg->ui & USEMASK) == selmon->tagset[selmon->seltags])
     return;
   selmon->seltags ^= 1; /* toggle sel tagset */
-  if (arg->ui & TAGMASK) {
-    selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+  if (arg->ui & USEMASK) {
+    selmon->tagset[selmon->seltags] = arg->ui & USEMASK;
     selmon->pertag->prevtag = selmon->pertag->curtag;
 
     if (arg->ui == ~0)
