@@ -27,7 +27,7 @@ static const char dmenuxpos[]       = "4";
 static const char dmenuypos[]       = "32";
 static const char dmenuwidth[]      = "432";
 static const char prompt[]          = "Software:";
-#include "../../libs/MyNord.h"
+#include "../libs/MyNord.h"
 static const char Icocolor0[]       = "#b5742d";
 static const char Icocolor1[]       = "#4081bd";
 static const char Icocolor2[]       = "#5c9e2f";
